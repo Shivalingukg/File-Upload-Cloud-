@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>File Upload UI — Presigned S3</title>
+  <style>
+    :root{ --bg:#f7fafc; --card:#fff; --accent:#2563eb; --muted:#6b7280; --danger:#ef4444; }
+    body{ font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial; background:var(--bg); margin:0; padding:24px; color:#111827; }
+    .wrap{ max-width:900px; margin:0 auto; }
+    header{ display:flex; align-items:center; gap:12px; margin-bottom:18px;}
+    h1{ margin:0; font-size:20px;}
+    .card{ background:var(--card); border-radius:12px; padding:18px; box-shadow:0 6px 18px rgba(15,23,42,0.06); margin-bottom:16px;}
+    label{ display:block; margin-bottom:8px; font-weight:600; color:#111827;}
+    input[type=file]{ padding:6px 0; }
+    .row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    button{ background:var(--accent); color:white; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; }
+    button.ghost{ background:transparent; color:var(--accent); border:1px solid rgba(37,99,235,0.12); }
+    button.danger{ background:var(--danger); }
+    .muted{ color:var(--muted); font-size:13px; }
+    .status{ margin-top:8px; font-size:13px; color:#065f46; }
+    .progress{ height:8px; background:#e6eefc; border-radius:6px; overflow:hidden; width:100%; margin-top:8px; }
+    .progress > i{ display:block; height:100%; width:0%; background:linear-gradient(90deg,#60a5fa,#2563eb); }
+    table{ width:100%; border-collapse:collapse; margin-top:12px; }
+    th,td{ text-align:left; padding:8px 6px; border-bottom:1px solid #eef2f7; font-size:14px; }
+    .actions button{ margin-right:6px; }
+    .footer{ text-align:center; color:var(--muted); margin-top:18px; font-size:13px;}
+    .small{ font-size:13px; color:var(--muted); }
+    .error{ color:var(--danger); }
+    .inline{ display:inline-block; vertical-align:middle; }
+    .pager{ display:flex; gap:8px; align-items:center; justify-content:flex-end; margin-top:12px;}
+    @media (max-width:640px){ .row{ flex-direction:column; align-items:stretch; } .pager{ justify-content:flex-start; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>File Upload UI — Presigned S3</h1>
+      <div class="small muted">Demo client for File Upload API (presign & confirm)</div>
+    </header>
+
+    <div class="card" id="uploadCard">
+      <label>Choose file to upload</label>
+      <div class="row">
+        <input id="fileInput" type="file" />
+        <input id="filename" placeholder="Optional: custom filename" />
+        <select id="contentTypeSelect" style="min-width:160px;">
+          <option value="application/octet-stream">Auto (default)</option>
+          <option value="image/jpeg">image/jpeg</option>
+          <option value="image/png">image/png</option>
+          <option value="application/pdf">application/pdf</option>
+          <option value="text/plain">text/plain</option>
+        </select>
+        <button id="uploadBtn">Upload</button>
+        <button class="ghost" id="refreshBtn">Refresh list</button>
+      </div>
+      <div class="status" id="status">Not started</div>
+      <div class="progress" style="display:none;"><i id="progBar"></i></div>
+      <div class="small muted" style="margin-top:8px;">
+        <strong>Note:</strong> This demo sends header <code>X-User-Id: user1</code> to simulate authentication.
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <strong>Your files</strong>
+          <div class="small muted">Paginated list from the API</div>
+        </div>
+        <div class="small">Showing page <span id="pageNum">0</span></div>
+      </div>
+
+      <table id="filesTable" aria-live="polite">
+        <thead>
+          <tr><th>Filename</th><th>Size</th><th>Type</th><th>Uploaded</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+          <tr><td colspan="5" class="muted">No files yet. Upload a file to see it here.</td></tr>
+        </tbody>
+      </table>
+
+      <div class="pager">
+        <div class="small">Page size</div>
+        <select id="pageSize">
+          <option>5</option>
+          <option selected>10</option>
+          <option>20</option>
+        </select>
+        <button class="ghost" id="prevPage">Prev</button>
+        <button class="ghost" id="nextPage">Next</button>
+      </div>
+    </div>
+
+    <div class="footer small muted">
+      API base: <code id="apiBaseDisplay">http://localhost:8080</code> — change in script if needed.
+    </div>
+  </div>
+
+  <script>
+  // ---------- Config ----------
+  const API_BASE = 'http://localhost:8080'; // change if your API runs elsewhere
+  const USER_ID = 'user1';                  // simulation header (replace with real auth)
+  // ----------------------------
+
+  // DOM
+  const fileInput = document.getElementById('fileInput');
+  const filenameInput = document.getElementById('filename');
+  const contentTypeSelect = document.getElementById('contentTypeSelect');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const statusEl = document.getElementById('status');
+  const progBar = document.getElementById('progBar');
+  const progressWrap = document.querySelector('.progress');
+  const filesTableBody = document.querySelector('#filesTable tbody');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const pageNumEl = document.getElementById('pageNum');
+  const prevPageBtn = document.getElementById('prevPage');
+  const nextPageBtn = document.getElementById('nextPage');
+  const pageSizeSelect = document.getElementById('pageSize');
+  const apiBaseDisplay = document.getElementById('apiBaseDisplay');
+
+  apiBaseDisplay.textContent = API_BASE;
+
+  // Pagination state
+  let page = 0;
+  let size = parseInt(pageSizeSelect.value || '10', 10);
+  let totalPages = 0;
+
+  function setStatus(text, isError=false) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle('error', isError);
+  }
+
+  function showProgress(percent) {
+    progressWrap.style.display = 'block';
+    progBar.style.width = percent + '%';
+  }
+  function hideProgress() {
+    progressWrap.style.display = 'none';
+    progBar.style.width = '0%';
+  }
+
+  // Helper: fetch with X-User-Id header
+  function apiFetch(path, opts={}) {
+    opts.headers = opts.headers || {};
+    opts.headers['X-User-Id'] = USER_ID;
+    // JSON default accept
+    if (!opts.headers['Accept']) opts.headers['Accept'] = 'application/json';
+    return fetch(API_BASE + path, opts);
+  }
+
+  // Upload flow
+  uploadBtn.addEventListener('click', async () => {
+    const file = fileInput.files[0];
+    if (!file) { setStatus('Select a file first', true); return; }
+
+    const customName = (filenameInput.value || '').trim();
+    const filename = customName || file.name;
+    let contentType = contentTypeSelect.value === 'application/octet-stream' ? file.type || 'application/octet-stream' : contentTypeSelect.value;
+
+    setStatus('Requesting presigned URL...');
+    try {
+      // 1) presign
+      const presignResp = await apiFetch('/files/presign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, contentType, size: file.size })
+      });
+      if (!presignResp.ok) {
+        const txt = await presignResp.text();
+        setStatus('Presign failed: ' + presignResp.status + ' ' + txt, true);
+        return;
+      }
+      const presign = await presignResp.json(); // { uploadUrl, key, expiresIn }
+      setStatus('Uploading file to S3...');
+
+      // 2) Upload directly to S3 using PUT
+      await uploadToS3(presign.uploadUrl, file, contentType);
+
+      setStatus('Confirming upload to API...');
+      // 3) Confirm
+      const confirmResp = await apiFetch('/files/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: presign.key, filename, contentType, size: file.size })
+      });
+      if (!confirmResp.ok) {
+        const txt = await confirmResp.text();
+        setStatus('Confirm failed: ' + confirmResp.status + ' ' + txt, true);
+        return;
+      }
+      const meta = await confirmResp.json();
+      setStatus('Upload completed: ' + meta.filename);
+      hideProgress();
+      fileInput.value = '';
+      filenameInput.value = '';
+      // refresh list
+      await loadList();
+    } catch (err) {
+      console.error(err);
+      setStatus('Upload error: ' + (err.message || err), true);
+      hideProgress();
+    }
+  });
+
+  // Upload using fetch + PUT and show progress via XHR (fetch has no progress for PUT)
+  function uploadToS3(url, file, contentType) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', url, true);
+      xhr.setRequestHeader('Content-Type', contentType);
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable) {
+          const pct = Math.round((ev.loaded / ev.total) * 100);
+          showProgress(pct);
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error('S3 upload failed: ' + xhr.status + ' ' + xhr.responseText));
+      };
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+      xhr.send(file);
+    });
+  }
+
+  // List files (paged)
+  async function loadList() {
+    setStatus('Loading files...');
+    try {
+      const resp = await apiFetch(`/files?page=${page}&size=${size}`, { method: 'GET' });
+      if (!resp.ok) { setStatus('List failed: ' + resp.status, true); return; }
+      const data = await resp.json();
+      renderList(data);
+      setStatus('Files loaded');
+    } catch (err) {
+      setStatus('List error: ' + err.message, true);
+    }
+  }
+
+  function renderList(data) {
+    const items = data.items || [];
+    totalPages = data.totalPages || 0;
+    page = data.page || 0;
+    pageNumEl.textContent = page;
+    filesTableBody.innerHTML = '';
+    if (!items.length) {
+      filesTableBody.innerHTML = '<tr><td colspan="5" class="muted">No files found.</td></tr>';
+      return;
+    }
+    for (const item of items) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${escapeHtml(item.filename)}</td>
+        <td>${formatBytes(item.size)}</td>
+        <td>${escapeHtml(item.contentType || '-')}</td>
+        <td>${escapeHtml(item.createdAt || '-')}</td>
+        <td class="actions">
+          <button data-key="${item.key}" class="downloadBtn">Download</button>
+          <button data-key="${item.key}" class="deleteBtn danger">Delete</button>
+        </td>
+      `;
+      filesTableBody.appendChild(tr);
+    }
+
+    // attach handlers
+    document.querySelectorAll('.downloadBtn').forEach(b => b.onclick = onDownload);
+    document.querySelectorAll('.deleteBtn').forEach(b => b.onclick = onDelete);
+  }
+
+  async function onDownload(e) {
+    const key = e.currentTarget.getAttribute('data-key');
+    setStatus('Requesting download URL...');
+    try {
+      const resp = await apiFetch(`/files/${encodeURIComponent(key)}/download`);
+      if (!resp.ok) { setStatus('Download URL failed: ' + resp.status, true); return; }
+      const data = await resp.json(); // { downloadUrl, expiresIn }
+      window.open(data.downloadUrl, '_blank');
+      setStatus('Opened download link (expires in ' + data.expiresIn + 's)');
+    } catch (err) {
+      setStatus('Download error: ' + err.message, true);
+    }
+  }
+
+  async function onDelete(e) {
+    if (!confirm('Delete this file?')) return;
+    const key = e.currentTarget.getAttribute('data-key');
+    setStatus('Deleting...');
+    try {
+      const resp = await apiFetch(`/files/${encodeURIComponent(key)}`, { method: 'DELETE' });
+      if (resp.status === 204) {
+        setStatus('Deleted');
+        await loadList();
+      } else {
+        setStatus('Delete failed: ' + resp.status, true);
+      }
+    } catch (err) {
+      setStatus('Delete error: ' + err.message, true);
+    }
+  }
+
+  // Pagination controls
+  prevPageBtn.addEventListener('click', () => {
+    if (page <= 0) return;
+    page--;
+    loadList();
+  });
+  nextPageBtn.addEventListener('click', () => {
+    if (page + 1 >= totalPages) return;
+    page++;
+    loadList();
+  });
+  pageSizeSelect.addEventListener('change', () => {
+    size = parseInt(pageSizeSelect.value, 10);
+    page = 0;
+    loadList();
+  });
+  refreshBtn.addEventListener('click', () => { loadList(); });
+
+  // util
+  function escapeHtml(s){ if (!s) return ''; return s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+  function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024, dm = 1;
+    const sizes = ['B','KB','MB','GB','TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+  }
+
+  // initial load
+  loadList();
+  </script>
+</body>
+</html>
